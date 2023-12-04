@@ -1,0 +1,100 @@
+#!/bin/bash
+
+### Script to run the HumaNN function for the metagenome pipeline
+### The script estimate the microbial pathways abundance
+### The following variable have to be assigned to env before launching it
+### RUN - The full path to the main run folder
+### EXPERIMENT - The type of experiment (RNASeq, Metagenome, Methylation, etc)
+### SAMPLELIST - The file containing the list of samples to process
+### N_THREADS - The number of threads for the script
+
+##################################
+### Setting up the environment ###
+##################################
+
+### Activate conda Metagenome-pipeline
+source /hpcnfs/software/anaconda/anaconda3/etc/profile.d/conda.sh
+conda activate /hpcnfs/data/mee/Bin/Conda_Envs/Metagenome
+
+### Setting up variables
+
+## Derived from the environment
+RUN=$RUN
+EXPERIMENT=$EXPERIMENT
+SAMPLELIST=$SAMPLELIST
+N_THREADS=$N_THREADS
+
+## Constructed variables
+FLOWCELL_ID=$(echo $RUN | cut -d "_" -f 4) 
+FLOWCELL_DIR="Shared/Data/${EXPERIMENT}/${FLOWCELL_ID}"
+
+## Tool-specific variables
+PROTEIN_DB_PATH="/hpcnfs/data/reference/uniref/uniref"
+NUCLEOTIDE_DB_PATH="/hpcnfs/data/reference/metaphlan/chocophlan"
+
+## Log file creation
+LOG_STDOUT=$FLOWCELL_DIR/${FLOWCELL_ID}_Humann_stdout.log
+LOG_STDERR=$FLOWCELL_DIR/${FLOWCELL_ID}_Humann_stderr.log
+LOG_PROCESS=$FLOWCELL_DIR/${FLOWCELL_ID}_Humann_trace.log
+
+## Redirect stdout and stderr to separate log file
+exec 1>>$LOG_STDOUT
+exec 2>>$LOG_STDERR
+
+##############
+### HUMANN ###
+##############
+
+## Pipeline start time
+START_TIME=$(date)
+echo "Humann start time: $START_TIME" >> $LOG_PROCESS
+
+## Get the list of samples to perform Metaphlan on
+mapfile -t samples < "$SAMPLELIST"
+
+TOTAL_SAMPLES=$(wc -l < $SAMPLELIST)
+CURRENT_SAMPLE=0
+
+## Loop the MetaPhlan command on all samples
+for ID in "${samples[@]}"
+do
+    # Set SampleID and Sample Folder
+    SAMPLEID=$ID
+    SAMPLEFOLDER=$FLOWCELL_DIR/$SAMPLEID
+    ((CURRENT_SAMPLE++))
+
+    # Check file existence 
+    if [[ -s "$SAMPLEFOLDER/${SAMPLEID}_*_genefamilies.tsv" && -s "$SAMPLEFOLDER/${SAMPLEID}_*_pathabundance.tsv" && -s "$SAMPLEFOLDER/${SAMPLEID}_*_pathcoverage.tsv" ]] ; then
+        echo "$(date +"%Y-%m-%d %H:%M:%S") - Humann skipped for $SAMPLEID as output files already exist" >> $LOG_PROCESS
+        #continue
+    fi
+
+    if [ ! -f "$SAMPLEFOLDER/${SAMPLEID}_preprocessed.fastq" ] ; then
+        echo "$(date +"%Y-%m-%d %H:%M:%S") - Decompressing $SAMPLEID fastQ file.." >> $LOG_PROCESS
+        pbzip2 -dkf -p$N_THREADS $SAMPLEFOLDER/${SAMPLEID}_preprocessed.fastq.bz2 > $SAMPLEFOLDER/${SAMPLEID}_preprocessed.fastq
+        echo "$(date +"%Y-%m-%d %H:%M:%S") - $SAMPLEID fastQ file decompressed." >> $LOG_PROCESS
+    fi
+
+    echo "$(date +"%Y-%m-%d %H:%M:%S") - Humann starting for $SAMPLEID (Sample $CURRENT_SAMPLE out of $TOTAL_SAMPLES)" >> $LOG_PROCESS
+    humann --input "$SAMPLEFOLDER/${SAMPLEID}_preprocessed.fastq" \
+           --input-format "fastq" \
+           --output "$SAMPLEFOLDER" \
+           --threads $N_THREADS \
+           --nucleotide-database $NUCLEOTIDE_DB_PATH \
+           --protein-database $PROTEIN_DB_PATH \
+           --remove-temp-output \
+           --taxonomic-profile $SAMPLEFOLDER/${SAMPLEID}_metaphlan4_vJan21_CHOCOPhlAnSGB_202103_q0.1.txt >>$LOG_STDOUT 2>>$LOG_STDERR
+    
+    if [[ -s "$SAMPLEFOLDER/${SAMPLEID}_*_genefamilies.tsv" && -s "$SAMPLEFOLDER/${SAMPLEID}_*_pathabundance.tsv" && -s "$SAMPLEFOLDER/${SAMPLEID}_*_pathcoverage.tsv" ]] ; then
+        echo "$(date +"%Y-%m-%d %H:%M:%S") - Deleting uncompressed $SAMPLEID fastQ and temporary files" >> $LOG_PROCESS
+        rm $SAMPLEFOLDER/${SAMPLEID}_preprocessed.fastq 
+        rm -r $SAMPLEFOLDER/${SAMPLEID}_preprocessed_humann_temp_*
+        echo "$(date +"%Y-%m-%d %H:%M:%S") - Uncompressed $SAMPLEID fastQ and temporary files deleted" >> $LOG_PROCESS
+    fi
+done
+
+
+END_TIME=$(date)
+echo "Humann end time: $END_TIME" >> $LOG_PROCESS
+echo "ELAPSED_TIME=$(($SECONDS / 3600))hrs $((($SECONDS / 60) % 60))min $(($SECONDS % 60))sec" >> $LOG_PROCESS
+echo "Total samples processed: $TOTAL_SAMPLES" >> $LOG_PROCESS
