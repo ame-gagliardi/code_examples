@@ -1,0 +1,118 @@
+#!/bin/bash
+
+### Script to run the preprocess function for the metagenome pipeline
+### The script remove the all the reads that align with the specified genomes (for now human and mouse)
+### The following variable have to be assigned to env before launching it
+### RUN - The full path to the main run folder
+### EXPERIMENT - The type of experiment (RNASeq, Metagenome, Methylation, etc)
+### ORGANISM - Human (hsa) or Mouse (mmus)
+### SAMPLELIST - The file containing the list of samples to process
+### N_THREADS - The number of threads for the script
+### B_THREADS - The number of threads dedicate to bowtie
+
+##################################
+### Setting up the environment ###
+##################################
+
+### Activate conda Metagenome-pipeline
+source /hpcnfs/software/anaconda/anaconda3/etc/profile.d/conda.sh
+conda activate /hpcnfs/data/mee/Bin/Conda_Envs/Metagenome
+
+### Setting up variables
+
+## Derived from the environment
+RUN=$RUN
+EXPERIMENT=$EXPERIMENT
+ORGANISM=$ORGANISM
+SAMPLELIST=$SAMPLELIST
+N_THREADS=$N_THREADS
+B_THREADS=$B_THREADS
+
+## Constructed variables
+FLOWCELL_ID=$(echo $RUN | cut -d "_" -f 4) 
+FLOWCELL_DIR="Shared/Data/${EXPERIMENT}/${FLOWCELL_ID}"
+
+## Tool-specific variables
+HUMAN_REFERENCE="/hpcnfs/data/mee/Reference/GRCh38.v33.annotation.with.introns"
+MOUSE_REFERENCE="/hpcnfs/data/mee/Reference/Mmus_GRCm39"
+#
+declare -A organism_info
+organism_info["hsa,ref"]="$HUMAN_REFERENCE"
+organism_info["hsa,par"]="--rm_hsap"
+organism_info["hsa,name"]="hg19"
+organism_info["mmus,ref"]="$MOUSE_REFERENCE"
+organism_info["mmus,par"]="--rm_mmus"
+organism_info["mmus,name"]="mmusculus-black6-GCA-000001635-8"
+
+## Run-specific variables
+REFERENCE_TO_USE=${organism_info["$ORGANISM,ref"]}
+GENOME_TO_REMOVE=${organism_info["$ORGANISM,par"]}
+ORGANISM_NAME=${organism_info["$ORGANISM,name"]}
+
+## Log file creation
+LOG_STDOUT=$FLOWCELL_DIR/${FLOWCELL_ID}_PreProcess_out.log
+LOG_STDERR=$FLOWCELL_DIR/${FLOWCELL_ID}_PreProcess_err.log
+LOG_PROCESS=$FLOWCELL_DIR/${FLOWCELL_ID}_PreProcess_trace.log
+
+## Redirect stdout and stderr to separate log file
+exec 1>>$LOG_STDOUT
+exec 2>>$LOG_STDERR
+
+##################
+### PREPROCESS ###
+##################
+
+## Pipeline start time
+START_TIME=$(date)
+echo "PreProcess start time: $START_TIME" >> $LOG_PROCESS
+
+## Get the list of samples to perform preprocessing on
+mapfile -t samples < "$SAMPLELIST"
+
+TOTAL_SAMPLES=$(wc -l < $SAMPLELIST)
+CURRENT_SAMPLE=0
+
+## Loop the PreProcessing command on all samples
+for ID in "${samples[@]}"
+do
+    # Set SampleID and Sample Folder
+    SAMPLEID=$ID
+    SAMPLEFOLDER=$FLOWCELL_DIR/$SAMPLEID
+    ((CURRENT_SAMPLE++))
+
+    if [[ -s "$SAMPLEFOLDER/${SAMPLEID}_R1.fastq.bz2" &&  -s "$SAMPLEFOLDER/${SAMPLEID}_R2.fastq.bz2" ]]; then
+        echo  
+        continue
+    fi
+
+    echo "$(date +"%Y-%m-%d %H:%M:%S") - Preprocessing $SAMPLEID" >> $LOG_PROCESS
+
+    preprocess.new.py -s $SAMPLEID \
+                      -i $SAMPLEFOLDER \
+                      -e .fastq.gz \
+                      --bowtie2_indexes $REFERENCE_TO_USE \
+                      $GENOME_TO_REMOVE \
+                      -b $B_THREADS \
+                      -n $N_THREADS >>$LOG_STDOUT 2>>$LOG_STDERR
+
+    echo "$(date +"%Y-%m-%d %H:%M:%S") - Preprocessing completed for $SAMPLEID (Sample $CURRENT_SAMPLE out of $TOTAL_SAMPLES)" >> $LOG_PROCESS
+    
+    echo "$(date +"%Y-%m-%d %H:%M:%S") - Renaming $SAMPLEID output files..." >> $LOG_PROCESS
+    mv $SAMPLEFOLDER/${SAMPLEID}${ORGANISM_NAME}_R1.fastq.bz2 $SAMPLEFOLDER/${SAMPLEID}_R1.fastq.bz2
+    mv $SAMPLEFOLDER/${SAMPLEID}${ORGANISM_NAME}_R2.fastq.bz2 $SAMPLEFOLDER/${SAMPLEID}_R2.fastq.bz2
+    mv $SAMPLEFOLDER/${SAMPLEID}${ORGANISM_NAME}_UN.fastq.bz2 $SAMPLEFOLDER/${SAMPLEID}_UN.fastq.bz2
+    echo "$(date +"%Y-%m-%d %H:%M:%S") - $SAMPLEID output files renamed" >> $LOG_PROCESS
+
+    echo "$(date +"%Y-%m-%d %H:%M:%S") - Removing $SAMPLEID temporary files..." >> $LOG_PROCESS
+    if [[ -s $SAMPLEFOLDER/${SAMPLEID}_R1.fastq.bz2 && -s $SAMPLEFOLDER/${SAMPLEID}_R2.fastq.bz2]] ; then
+        rm $SAMPLEFOLDER/${SAMPLEID}*.stats
+    fi
+    echo "$(date +"%Y-%m-%d %H:%M:%S") - $SAMPLEID temporary files removed." >> $LOG_PROCESS
+
+
+done
+
+END_TIME=$(date)
+echo "PreProcess end time: $END_TIME" >> $LOG_PROCESS
+echo "ELAPSED_TIME=$(($SECONDS / 3600))hrs $((($SECONDS / 60) % 60))min $(($SECONDS % 60))sec" >> $LOG_PROCESS
+echo "Total samples processed: $TOTAL_SAMPLES" >> $LOG_PROCESS
