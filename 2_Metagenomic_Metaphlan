@@ -1,0 +1,94 @@
+#!/bin/bash
+
+### Script to run the MetaPhlan function for the metagenome pipeline
+### The script compute the relative abundancies of microbial species for each sample (by default computes them for all taxonomic levels).
+### The following variable have to be assigned to env before launching it
+### RUN - The full path to the main run folder
+### EXPERIMENT - The type of experiment (RNASeq, Metagenome, Methylation, etc)
+### SAMPLELIST - The file containing the list of samples to process
+### N_THREADS - The number of threads for the script
+
+##################################
+### Setting up the environment ###
+##################################
+
+### Activate conda Metagenome-pipeline
+source /hpcnfs/software/anaconda/anaconda3/etc/profile.d/conda.sh
+conda activate /hpcnfs/data/mee/Bin/Conda_Envs/Metagenome
+
+### Setting up variables
+
+## Derived from the environment
+RUN=$RUN
+EXPERIMENT=$EXPERIMENT
+SAMPLELIST=$SAMPLELIST
+N_THREADS=$N_THREADS
+
+## Constructed variables
+FLOWCELL_ID=$(echo $RUN | cut -d "_" -f 4) 
+FLOWCELL_DIR="Shared/Data/${EXPERIMENT}/${FLOWCELL_ID}"
+
+## Tool-specific variables
+BOWTIE_DB_PATH="/hpcnfs/data/reference/metaphlan/mpa_vJan21_CHOCOPhlAnSGB_2021033"
+
+## Log file creation
+LOG_STDOUT=$FLOWCELL_DIR/${FLOWCELL_ID}_Metaphlan_stdout.log
+LOG_STDERR=$FLOWCELL_DIR/${FLOWCELL_ID}_Metaphlan_stderr.log
+LOG_PROCESS=$FLOWCELL_DIR/${FLOWCELL_ID}_Metaphlan_trace.log
+
+## Redirect stdout and stderr to separate log file
+exec 1>>$LOG_STDOUT
+exec 2>>$LOG_STDERR
+
+#################
+### METAPHLAN ###
+#################
+
+## Pipeline start time
+START_TIME=$(date)
+echo "MetaPhlan start time: $START_TIME" >> $LOG_PROCESS
+
+## Get the list of samples to perform Metaphlan on
+mapfile -t samples < "$SAMPLELIST"
+
+TOTAL_SAMPLES=$(wc -l < $SAMPLELIST)
+CURRENT_SAMPLE=0
+
+## Loop the MetaPhlan command on all samples
+for ID in "${samples[@]}"
+do
+    # Set SampleID and Sample Folder
+    SAMPLEID=$ID
+    SAMPLEFOLDER=$FLOWCELL_DIR/$SAMPLEID
+    ((CURRENT_SAMPLE++))
+
+    # Check file existence
+    if [[ -s "$SAMPLEFOLDER/${SAMPLEID}_metaphlan4_vJan21_CHOCOPhlAnSGB_202103_q0.1.txt" ]] ; then
+        echo "$(date +"%Y-%m-%d %H:%M:%S") - MetaPhlan skipped for $SAMPLEID as output files already exist" >> $LOG_PROCESS
+        continue
+    fi
+
+    if [ ! -s "$SAMPLEFOLDER/${SAMPLEID}_preprocessed.fastq.bz2" ] ; then
+        echo "$(date +"%Y-%m-%d %H:%M:%S") - Merging the reads fastQ files for $SAMPLEID ..." >> $LOG_PROCESS
+        cat "$SAMPLEFOLDER/${SAMPLEID}_R1.fastq.bz2" "$SAMPLEFOLDER/${SAMPLEID}_R2.fastq.bz2" > "$SAMPLEFOLDER/${SAMPLEID}_preprocessed.fastq.bz2"
+    fi
+
+    # MetaPhlan
+
+    echo "$(date +"%Y-%m-%d %H:%M:%S") - MetaPhlan started on $SAMPLEID ..." >> $LOG_PROCESS
+    
+    metaphlan "$SAMPLEFOLDER/${SAMPLEID}_preprocessed.fastq.bz2" \
+              --input_type fastq \
+              --bowtie2db $BOWTIE_DB_PATH \
+              -x mpa_vJan21_CHOCOPhlAnSGB_202103 \
+              --nproc $N_THREADS \
+              --stat_q 0.1 \
+              -o ${SAMPLEFOLDER}/${SAMPLEID}_metaphlan4_vJan21_CHOCOPhlAnSGB_202103_q0.1.txt >>$LOG_STDOUT 2>>$LOG_STDERR
+    
+    echo "$(date +"%Y-%m-%d %H:%M:%S") - Metaphlan completed for $SAMPLEID (Sample $CURRENT_SAMPLE out of $TOTAL_SAMPLES)" >> $LOG_PROCESS
+done
+
+END_TIME=$(date)
+echo "Metaphlan end time: $END_TIME" >> $LOG_PROCESS
+echo "ELAPSED_TIME=$(($SECONDS / 3600))hrs $((($SECONDS / 60) % 60))min $(($SECONDS % 60))sec" >> $LOG_PROCESS
+echo "Total samples processed: $TOTAL_SAMPLES" >> $LOG_PROCESS
